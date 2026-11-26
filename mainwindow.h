@@ -4,10 +4,12 @@
 
 #include <QMainWindow>
 #include <QVector>
+#include <QSqlDatabase>
 
 class QGraphicsScene;
 class QGraphicsItem;
 class QGraphicsLineItem;
+class QSqlTableModel;
 
 QT_BEGIN_NAMESPACE
 namespace Ui {
@@ -42,9 +44,15 @@ private:
     int m_nextId = 1;
     QVector<Connection> m_connections;
 
+    QSqlDatabase m_database;
+    QSqlTableModel *m_tableModel = nullptr;
+
+    void loadShapesFromDatabase();
+    bool initializeDatabase();
     void addShape(ShapeType type);
     void connectSelectedShapes();
     void updateConnections();
+    void deleteSelectedShape();
 };
 
 #endif // MAINWINDOW_H
