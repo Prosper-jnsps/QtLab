@@ -18,7 +18,7 @@
 #include <QPen>
 #include <QBrush>
 #include <QColor>
-
+#include <QTimer>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSqlError>
@@ -27,7 +27,7 @@
 #include <QDir>
 #include <QDebug>
 #include <QAbstractItemView>
-
+#include <QHash>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -50,9 +50,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     ui->graphicsView->setScene(m_scene);
     // Восстановление сохранённых фигур
+
+    // Восстановление фигур и связей из базы данных
     if (m_database.isOpen()) {
         loadShapesFromDatabase();
+        loadConnectionsFromDatabase();
     }
+
     // Выделение нескольких фигур
     ui->graphicsView->setDragMode(
         QGraphicsView::RubberBandDrag
@@ -86,12 +90,24 @@ MainWindow::MainWindow(QWidget *parent)
                 deleteSelectedShape();
             });
 
+    // Таймер сохранения координат фигур
+    m_positionSaveTimer = new QTimer(this);
+    m_positionSaveTimer->setSingleShot(true);
+    m_positionSaveTimer->setInterval(300);
 
-    // Обновление линий при перемещении фигур
+    connect(m_positionSaveTimer, &QTimer::timeout,
+            this, &MainWindow::savePositions);
+
+    // Обновление линий и сохранение координат
     connect(m_scene, &QGraphicsScene::changed,
             this, [this](const QList<QRectF> &) {
+
                 updateConnections();
+
+                // Сохраняем координаты после перемещения
+                m_positionSaveTimer->start();
             });
+
 }
 
 
@@ -385,11 +401,11 @@ void MainWindow::connectSelectedShapes()
 
 // Удаление выбранной фигуры и её связей
 
+
 void MainWindow::deleteSelectedShape()
 {
     QList<QGraphicsItem *> selected;
 
-    // Поиск выбранной фигуры
     for (QGraphicsItem *item : m_scene->selectedItems()) {
         if (item->data(0).isValid()) {
             selected.append(item);
@@ -398,8 +414,7 @@ void MainWindow::deleteSelectedShape()
 
     if (selected.size() != 1) {
         QMessageBox::warning(
-            this,
-            "Ошибка",
+            this, "Ошибка",
             "Выберите одну фигуру для удаления!"
             );
         return;
@@ -408,45 +423,96 @@ void MainWindow::deleteSelectedShape()
     QGraphicsItem *item = selected.first();
     int id = item->data(0).toInt();
 
-    // Начало транзакции базы данных
     if (!m_database.transaction()) {
         QMessageBox::critical(
-            this,
-            "Ошибка SQLite",
+            this, "Ошибка SQLite",
             m_database.lastError().text()
             );
         return;
     }
 
-    // Удаление фигуры из базы данных
-    QSqlQuery query(m_database);
+    // Удаляем связи из базы данных
+    QSqlQuery deleteLinks(m_database);
 
-    query.prepare("DELETE FROM figures WHERE id = :id");
-    query.bindValue(":id", id);
+    deleteLinks.prepare(
+        "DELETE FROM figure_connections "
+        "WHERE figure1_id = :id1 OR figure2_id = :id2"
+        );
 
-    if (!query.exec() || query.numRowsAffected() != 1) {
-        QString error = query.lastError().text();
+    deleteLinks.bindValue(":id1", id);
+    deleteLinks.bindValue(":id2", id);
+
+    if (!deleteLinks.exec()) {
+        QString error = deleteLinks.lastError().text();
         m_database.rollback();
+        QMessageBox::critical(this, "Ошибка SQLite", error);
+        return;
+    }
 
-        QMessageBox::critical(
-            this, "Ошибка SQLite",
-            "Не удалось удалить фигуру ID " +
-                QString::number(id) + "\n" + error
+    // Удаляем фигуру из базы данных
+    QSqlQuery deleteFigure(m_database);
+
+    deleteFigure.prepare(
+        "DELETE FROM figures WHERE id = :id"
+        );
+    deleteFigure.bindValue(":id", id);
+
+    if (!deleteFigure.exec()) {
+        QString error = deleteFigure.lastError().text();
+        m_database.rollback();
+        QMessageBox::critical(this, "Ошибка SQLite", error);
+        return;
+    }
+
+    if (deleteFigure.numRowsAffected() != 1) {
+        m_database.rollback();
+        QMessageBox::warning(
+            this, "Ошибка",
+            "Фигура не найдена в базе данных!"
             );
         return;
     }
 
-    // Обновление количества фигур каждого типа
-    QSqlQuery countQuery(m_database);
+    // Обновляем список связей оставшихся фигур
+    QSqlQuery updateLinks(m_database);
 
-    if (!countQuery.exec(
-            "UPDATE figures SET type_count = "
-            "(SELECT COUNT(*) FROM figures AS f "
-            "WHERE f.type = figures.type)"
-            )) {
-        QString error = countQuery.lastError().text();
+    if (!updateLinks.exec(R"(
+        UPDATE figures
+        SET connected_ids = COALESCE(
+            (
+                SELECT GROUP_CONCAT(
+                    CASE
+                        WHEN c.figure1_id = figures.id
+                        THEN c.figure2_id
+                        ELSE c.figure1_id
+                    END, ', '
+                )
+                FROM figure_connections AS c
+                WHERE c.figure1_id = figures.id
+                   OR c.figure2_id = figures.id
+            ),
+            ''
+        )
+    )")) {
+        QString error = updateLinks.lastError().text();
         m_database.rollback();
+        QMessageBox::critical(this, "Ошибка SQLite", error);
+        return;
+    }
 
+    // Обновляем количество фигур каждого типа
+    QSqlQuery updateCount(m_database);
+
+    if (!updateCount.exec(R"(
+        UPDATE figures
+        SET type_count = (
+            SELECT COUNT(*)
+            FROM figures AS f
+            WHERE f.type = figures.type
+        )
+    )")) {
+        QString error = updateCount.lastError().text();
+        m_database.rollback();
         QMessageBox::critical(this, "Ошибка SQLite", error);
         return;
     }
@@ -454,37 +520,35 @@ void MainWindow::deleteSelectedShape()
     if (!m_database.commit()) {
         QString error = m_database.lastError().text();
         m_database.rollback();
-
         QMessageBox::critical(this, "Ошибка SQLite", error);
         return;
     }
 
-    // Удаление связанных линий со сцены
+    // Удаляем графические линии
     for (int i = m_connections.size() - 1; i >= 0; --i) {
-
         const Connection &connection = m_connections[i];
 
         if (connection.first == item ||
             connection.second == item) {
 
             QGraphicsLineItem *line = connection.line;
-
             m_connections.removeAt(i);
             delete line;
         }
     }
 
-    // Удаление графической фигуры
+    // Удаляем графическую фигуру
     delete item;
 
-    // Обновление таблицы
+    // Обновляем отображение таблицы
     if (!m_tableModel->select()) {
         QMessageBox::warning(
-            this,
-            "Ошибка таблицы",
+            this, "Ошибка таблицы",
             m_tableModel->lastError().text()
             );
     }
+
+    qDebug() << "Удалена фигура ID:" << id;
 }
 
 
@@ -712,8 +776,138 @@ void MainWindow::loadShapesFromDatabase()
     }
 }
 
+void MainWindow::loadConnectionsFromDatabase()
+{
+    // Поиск фигур по идентификаторам
+    QHash<int, QGraphicsItem *> figures;
+
+    for (QGraphicsItem *item : m_scene->items()) {
+        if (item->data(0).isValid()) {
+            int id = item->data(0).toInt();
+            figures.insert(id, item);
+        }
+    }
+
+    // Получение связей из базы данных
+    QSqlQuery query(m_database);
+
+    if (!query.exec(
+            "SELECT figure1_id, figure2_id "
+            "FROM figure_connections"
+            )) {
+        QMessageBox::warning(
+            this,
+            "Ошибка SQLite",
+            query.lastError().text()
+            );
+        return;
+    }
+
+    while (query.next()) {
+
+        int id1 = query.value(0).toInt();
+        int id2 = query.value(1).toInt();
+
+        // Проверка существования фигур
+        if (!figures.contains(id1) ||
+            !figures.contains(id2)) {
+            qWarning() << "Связь с неизвестной фигурой:"
+                       << id1 << id2;
+            continue;
+        }
+
+        QGraphicsItem *first = figures.value(id1);
+        QGraphicsItem *second = figures.value(id2);
+
+        // Координаты центров фигур
+        QPointF p1 =
+            first->sceneBoundingRect().center();
+
+        QPointF p2 =
+            second->sceneBoundingRect().center();
+
+        // Восстановление графической линии
+        QGraphicsLineItem *line = m_scene->addLine(
+            QLineF(p1, p2),
+            QPen(QColor(70, 70, 70), 2)
+            );
+
+        line->setZValue(0);
+
+        // Сохранение связи в памяти
+        m_connections.append({
+            first,
+            second,
+            line
+        });
+    }
+}
+
+void MainWindow::savePositions()
+{
+    if (!m_database.isOpen() || !m_scene)
+        return;
+
+    QSqlQuery query(m_database);
+
+    // Обновляем координаты только при изменении
+    if (!query.prepare(R"(
+        UPDATE figures
+        SET pos_x = :x, pos_y = :y
+        WHERE id = :id
+          AND (pos_x <> :check_x
+               OR pos_y <> :check_y)
+    )")) {
+        qWarning() << query.lastError().text();
+        return;
+    }
+
+    bool updated = false;
+
+    for (QGraphicsItem *item : m_scene->items()) {
+
+        // Пропускаем линии и подписи
+        if (!item->data(0).isValid())
+            continue;
+
+        int id = item->data(0).toInt();
+        QPointF pos = item->pos();
+
+        query.bindValue(":id", id);
+        query.bindValue(":x", pos.x());
+        query.bindValue(":y", pos.y());
+        query.bindValue(":check_x", pos.x());
+        query.bindValue(":check_y", pos.y());
+
+        if (!query.exec()) {
+            qWarning() << "Ошибка сохранения ID:"
+                       << id
+                       << query.lastError().text();
+            continue;
+        }
+
+        if (query.numRowsAffected() > 0)
+            updated = true;
+    }
+
+    // Обновляем таблицу при изменении координат
+    if (updated && m_tableModel) {
+        if (!m_tableModel->select()) {
+            qWarning() << m_tableModel->lastError().text();
+        }
+    }
+}
 
 MainWindow::~MainWindow()
 {
+    // Сохранение последних координат перед закрытием
+    if (m_positionSaveTimer)
+        m_positionSaveTimer->stop();
+
+    savePositions();
+
     delete ui;
 }
+
+
+

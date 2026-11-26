@@ -10,7 +10,7 @@ class QGraphicsScene;
 class QGraphicsItem;
 class QGraphicsLineItem;
 class QSqlTableModel;
-
+class QTimer;
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
@@ -46,13 +46,15 @@ private:
 
     QSqlDatabase m_database;
     QSqlTableModel *m_tableModel = nullptr;
-
+    QTimer *m_positionSaveTimer = nullptr;
     void loadShapesFromDatabase();
     bool initializeDatabase();
     void addShape(ShapeType type);
     void connectSelectedShapes();
     void updateConnections();
     void deleteSelectedShape();
+    void loadConnectionsFromDatabase();
+    void savePositions();
 };
 
 #endif // MAINWINDOW_H
