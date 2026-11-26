@@ -1,7 +1,7 @@
 
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
-
+#include "shapecountdelegate.h"
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QGraphicsItem>
@@ -10,7 +10,7 @@
 #include <QGraphicsPolygonItem>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsLineItem>
-
+#include <QHeaderView>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QPushButton>
@@ -28,6 +28,11 @@
 #include <QDebug>
 #include <QAbstractItemView>
 #include <QHash>
+#include <QComboBox>
+#include <QSpinBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QStringList>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -61,6 +66,105 @@ MainWindow::MainWindow(QWidget *parent)
     ui->graphicsView->setDragMode(
         QGraphicsView::RubberBandDrag
         );
+
+    // Панель фильтрации фигур
+    QHBoxLayout *filterLayout = new QHBoxLayout();
+
+    // Фильтр по ID
+    QSpinBox *idFilter = new QSpinBox(ui->centralwidget);
+    idFilter->setRange(0, 1000000000);
+    idFilter->setSpecialValueText("Все");
+
+    filterLayout->addWidget(new QLabel("ID:", this));
+    filterLayout->addWidget(idFilter);
+
+    // Фильтр по типу фигуры
+    QComboBox *typeFilter = new QComboBox(ui->centralwidget);
+
+    typeFilter->addItem("Все типы", "");
+    typeFilter->addItem("Прямоугольник", "Прямоугольник");
+    typeFilter->addItem("Эллипс", "Эллипс");
+    typeFilter->addItem("Многоугольник", "Многоугольник");
+
+    filterLayout->addWidget(new QLabel("Тип:", this));
+    filterLayout->addWidget(typeFilter);
+
+    // Фильтр по количеству фигур данного типа
+    QSpinBox *countFilter = new QSpinBox(ui->centralwidget);
+    countFilter->setRange(0, 1000000);
+    countFilter->setSpecialValueText("Все");
+
+    filterLayout->addWidget(
+        new QLabel("Количество:", this)
+        );
+    filterLayout->addWidget(countFilter);
+
+    // Кнопка сброса фильтров
+    QPushButton *resetButton =
+        new QPushButton("Сбросить", ui->centralwidget);
+
+    filterLayout->addWidget(resetButton);
+
+    // Добавляем панель под основными кнопками
+    ui->verticalLayout->insertLayout(1, filterLayout);
+
+    // Применение фильтров к модели
+    auto applyFilters = [this, idFilter, typeFilter, countFilter]() {
+
+        if (!m_tableModel)
+            return;
+
+        QStringList conditions;
+
+        if (idFilter->value() > 0) {
+            conditions << QString("id = %1")
+            .arg(idFilter->value());
+        }
+
+        QString selectedType =
+            typeFilter->currentData().toString();
+
+        if (!selectedType.isEmpty()) {
+            conditions << QString("type = '%1'")
+            .arg(selectedType);
+        }
+
+        if (countFilter->value() > 0) {
+            conditions << QString("type_count = %1")
+            .arg(countFilter->value());
+        }
+
+        m_tableModel->setFilter(
+            conditions.join(" AND ")
+            );
+
+        if (!m_tableModel->select()) {
+            QMessageBox::warning(
+                this,
+                "Ошибка фильтрации",
+                m_tableModel->lastError().text()
+                );
+        }
+    };
+
+    // Автоматическая фильтрация
+    connect(idFilter, &QSpinBox::valueChanged,
+            this, applyFilters);
+
+    connect(typeFilter, &QComboBox::currentIndexChanged,
+            this, applyFilters);
+
+    connect(countFilter, &QSpinBox::valueChanged,
+            this, applyFilters);
+
+    // Сброс фильтров
+    connect(resetButton, &QPushButton::clicked,
+            this, [=]() {
+                idFilter->setValue(0);
+                typeFilter->setCurrentIndex(0);
+                countFilter->setValue(0);
+                applyFilters();
+            });
 
     // Кнопки создания фигур
     connect(ui->btnRectangle, &QPushButton::clicked,
@@ -666,6 +770,17 @@ bool MainWindow::initializeDatabase()
         7, Qt::Horizontal, "Количество");
 
     ui->tableView->setModel(m_tableModel);
+
+    // Делегат отображения количества фигур
+    ui->tableView->setItemDelegateForColumn(
+        7,
+        new ShapeCountDelegate(ui->tableView)
+        );
+
+    // Ширина и высота ячеек
+    ui->tableView->setColumnWidth(7, 120);
+    ui->tableView->verticalHeader()->setDefaultSectionSize(32);
+
     ui->tableView->setEditTriggers(
         QAbstractItemView::NoEditTriggers
         );

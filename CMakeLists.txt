@@ -17,12 +17,17 @@ set(PROJECT_SOURCES
         mainwindow.cpp
         mainwindow.h
         mainwindow.ui
+        shapecountdelegate.cpp
+        shapecountdelegate.h
+
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(ShapeLink
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
+        shapecountdelegate.h
+        shapecountdelegate.cpp
     )
 # Define target properties for Android with Qt 6 as:
 #    set_property(TARGET ShapeLink APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
